@@ -42,8 +42,11 @@ function getExtensionFromMimeType(mimeType: string): string {
   return 'jpg';
 }
 
-function bufferToBlobPart(buffer: Buffer): Uint8Array {
-  return new Uint8Array(buffer.buffer, buffer.byteOffset, buffer.byteLength);
+function bufferToArrayBuffer(buffer: Buffer): ArrayBuffer {
+  const bytes = new Uint8Array(buffer);
+  const copy = new Uint8Array(bytes.length);
+  copy.set(bytes);
+  return copy.buffer;
 }
 
 async function localFileToFile(publicPath: string, filenamePrefix: string): Promise<File> {
@@ -63,7 +66,7 @@ async function localFileToFile(publicPath: string, filenamePrefix: string): Prom
   const mimeType = getMimeTypeFromPath(absolutePath);
   const ext = getExtensionFromMimeType(mimeType);
 
-  return new File([bufferToBlobPart(fileBuffer)], `${filenamePrefix}.${ext}`, {
+  return new File([bufferToArrayBuffer(fileBuffer)], `${filenamePrefix}.${ext}`, {
     type: mimeType,
   });
 }
@@ -80,7 +83,7 @@ function dataUrlToFile(dataUrl: string, filenamePrefix: string): File {
   const ext = getExtensionFromMimeType(mimeType);
   const buffer = Buffer.from(base64Data, 'base64');
 
-  return new File([bufferToBlobPart(buffer)], `${filenamePrefix}.${ext}`, {
+  return new File([bufferToArrayBuffer(buffer)], `${filenamePrefix}.${ext}`, {
     type: mimeType,
   });
 }
@@ -98,7 +101,7 @@ async function remoteUrlToFile(imageUrl: string, filenamePrefix: string): Promis
   const ext = getExtensionFromMimeType(mimeType);
   const buffer = Buffer.from(arrayBuffer);
 
-  return new File([bufferToBlobPart(buffer)], `${filenamePrefix}.${ext}`, {
+  return new File([bufferToArrayBuffer(buffer)], `${filenamePrefix}.${ext}`, {
     type: mimeType,
   });
 }
