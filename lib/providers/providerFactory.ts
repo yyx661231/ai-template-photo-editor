@@ -1,3 +1,4 @@
+import { AliyunImageProvider } from './aliyun';
 import { DemoImageProvider } from './demo';
 import { OpenAIImageProvider } from './openai';
 import { ImageEditProvider } from './types';
@@ -9,6 +10,9 @@ export function getImageEditProvider(): ImageEditProvider {
     case 'openai':
     case 'openai-compatible':
       return new OpenAIImageProvider();
+    case 'aliyun':
+    case 'aliyun-bailian':
+      return new AliyunImageProvider();
     case 'demo':
       return new DemoImageProvider();
     default:
