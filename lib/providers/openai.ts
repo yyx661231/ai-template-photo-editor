@@ -5,9 +5,9 @@ import { EditMode, GenerateRequest, OptimizeRequest, TaskResultPayload } from '.
 import { ImageEditProvider } from './types';
 
 const OPENAI_BASE_URL = process.env.OPENAI_BASE_URL || 'https://api.openai.com/v1';
-const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-1.5';
+const OPENAI_IMAGE_MODEL = process.env.OPENAI_IMAGE_MODEL || 'gpt-image-2';
 const DEFAULT_OUTPUT_FORMAT = 'jpeg';
-const REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 60000);
+const REQUEST_TIMEOUT_MS = Number(process.env.OPENAI_REQUEST_TIMEOUT_MS || 180000);
 
 interface OpenAIImageResponse {
   data?: Array<{
@@ -35,7 +35,14 @@ function getMimeTypeFromPath(filePath: string): string {
   return 'image/jpeg';
 }
 
-async function localFileToDataUrl(publicPath: string): Promise<string> {
+function getExtensionFromMimeType(mimeType: string): string {
+  if (mimeType === 'image/png') return 'png';
+  if (mimeType === 'image/webp') return 'webp';
+
+  return 'jpg';
+}
+
+async function localFileToFile(publicPath: string, filenamePrefix: string): Promise<File> {
   const absolutePath = path.join(process.cwd(), 'public', publicPath.replace(/^\//, ''));
   let fileBuffer: Buffer;
 
@@ -50,21 +57,58 @@ async function localFileToDataUrl(publicPath: string): Promise<string> {
   }
 
   const mimeType = getMimeTypeFromPath(absolutePath);
+  const ext = getExtensionFromMimeType(mimeType);
 
-  return `data:${mimeType};base64,${fileBuffer.toString('base64')}`;
+  return new File([fileBuffer], `${filenamePrefix}.${ext}`, { type: mimeType });
 }
 
-async function normalizeImageSource(imageSource: string): Promise<string> {
+function dataUrlToFile(dataUrl: string, filenamePrefix: string): File {
+  const [header, base64Data] = dataUrl.split(',');
+
+  if (!header || !base64Data) {
+    throw new Error('无效的图片数据格式。');
+  }
+
+  const mimeMatch = header.match(/^data:(.*?);base64$/);
+  const mimeType = mimeMatch?.[1] || 'image/jpeg';
+  const ext = getExtensionFromMimeType(mimeType);
+
+  return new File([Buffer.from(base64Data, 'base64')], `${filenamePrefix}.${ext}`, {
+    type: mimeType,
+  });
+}
+
+async function remoteUrlToFile(imageUrl: string, filenamePrefix: string): Promise<File> {
+  const response = await fetch(imageUrl);
+
+  if (!response.ok) {
+    throw new Error(`无法下载远程图片资源：${imageUrl}`);
+  }
+
+  const arrayBuffer = await response.arrayBuffer();
+  const mimeType =
+    response.headers.get('content-type')?.split(';')[0].trim() || 'image/jpeg';
+  const ext = getExtensionFromMimeType(mimeType);
+
+  return new File([Buffer.from(arrayBuffer)], `${filenamePrefix}.${ext}`, {
+    type: mimeType,
+  });
+}
+
+async function normalizeImageSourceToFile(
+  imageSource: string,
+  filenamePrefix: string
+): Promise<File> {
   if (imageSource.startsWith('data:')) {
-    return imageSource;
+    return dataUrlToFile(imageSource, filenamePrefix);
   }
 
   if (imageSource.startsWith('http://') || imageSource.startsWith('https://')) {
-    return imageSource;
+    return remoteUrlToFile(imageSource, filenamePrefix);
   }
 
   if (imageSource.startsWith('/')) {
-    return localFileToDataUrl(imageSource);
+    return localFileToFile(imageSource, filenamePrefix);
   }
 
   throw new Error(`不支持的图片来源：${imageSource}`);
@@ -93,23 +137,26 @@ async function callOpenAIImageEdit(params: {
   const timeout = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
 
   try {
+    const formData = new FormData();
+
+    for (const [index, imageSource] of params.images.entries()) {
+      const imageFile = await normalizeImageSourceToFile(imageSource, `input-${index + 1}`);
+      formData.append('image', imageFile);
+    }
+
+    formData.append('model', OPENAI_IMAGE_MODEL);
+    formData.append('prompt', params.prompt);
+    formData.append('input_fidelity', 'high');
+    formData.append('size', params.size || '1536x1024');
+    formData.append('quality', 'high');
+    formData.append('output_format', DEFAULT_OUTPUT_FORMAT);
+
     const response = await fetch(`${OPENAI_BASE_URL}/images/edits`, {
       method: 'POST',
       headers: {
-        'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({
-        model: OPENAI_IMAGE_MODEL,
-        images: params.images.map((imageUrl) => ({
-          image_url: imageUrl,
-        })),
-        prompt: params.prompt,
-        input_fidelity: 'high',
-        size: params.size || '1536x1024',
-        quality: 'high',
-        output_format: DEFAULT_OUTPUT_FORMAT,
-      }),
+      body: formData,
       signal: controller.signal,
     });
 
@@ -121,6 +168,23 @@ async function callOpenAIImageEdit(params: {
     if (!response.ok) {
       const apiMessage =
         payload && 'error' in payload ? payload.error?.message : undefined;
+
+      if (apiMessage?.includes('Incorrect API key provided')) {
+        throw new Error('图片接口认证失败：当前 API Key 无效，请检查兼容平台 Key。');
+      }
+
+      if (
+        apiMessage?.includes('Billing hard limit has been reached') ||
+        apiMessage?.includes('insufficient_quota')
+      ) {
+        throw new Error('图片接口额度不足：当前账户或接入平台余额不够。');
+      }
+
+      if (apiMessage?.toLowerCase().includes('model')) {
+        throw new Error(
+          `图片模型不可用：当前配置模型为 ${OPENAI_IMAGE_MODEL}，请检查接入平台是否支持。`
+        );
+      }
 
       throw new Error(apiMessage || '真实图片编辑接口调用失败。');
     }
@@ -141,7 +205,9 @@ async function callOpenAIImageEdit(params: {
     throw new Error('真实图片编辑接口未返回可用图片结果。');
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
-      throw new Error(`调用图像编辑服务超时，已等待 ${REQUEST_TIMEOUT_MS}ms。`);
+      throw new Error(
+        `调用图像编辑服务超时，已等待 ${REQUEST_TIMEOUT_MS}ms，请提高 OPENAI_REQUEST_TIMEOUT_MS 或更换更快的接入平台。`
+      );
     }
 
     throw error;
@@ -161,11 +227,11 @@ export class OpenAIImageProvider implements ImageEditProvider {
     const images = [await normalizeImageSource(template.imageUrl)];
 
     if (request.handImage) {
-      images.push(await normalizeImageSource(request.handImage));
+      images.push(request.handImage);
     }
 
     if (request.sceneImage) {
-      images.push(await normalizeImageSource(request.sceneImage));
+      images.push(request.sceneImage);
     }
 
     const prompt = buildOrderedEditPrompt(request.mode, request.prompt || '');
@@ -183,9 +249,8 @@ export class OpenAIImageProvider implements ImageEditProvider {
   }
 
   async optimizeGeneratedImage(request: OptimizeRequest): Promise<TaskResultPayload> {
-    const normalizedInput = await normalizeImageSource(request.imageUrl);
     const resultImageUrl = await callOpenAIImageEdit({
-      images: [normalizedInput],
+      images: [request.imageUrl],
       prompt: request.currentPrompt,
       size: '1536x1024',
     });

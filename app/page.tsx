@@ -333,7 +333,7 @@ export default function Home() {
           <p className="mt-1">
             {activeTaskId
               ? `当前任务 ID：${activeTaskId}`
-              : '后端请在香港或新加坡部署，并在服务端环境变量中配置 OPENAI_API_KEY'}
+              : '后端支持两种模式：配置兼容图片接口的 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_IMAGE_MODEL，或将 IMAGE_PROVIDER 设为 demo 进入演示模式'}
           </p>
         </div>
       </main>

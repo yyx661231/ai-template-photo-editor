@@ -32,7 +32,7 @@ export default function Navbar() {
           </div>
           <div className="hidden sm:flex items-center gap-2 text-sm text-surface-500">
             <span className="w-2 h-2 rounded-full bg-green-500 animate-pulse-soft"></span>
-            真实 API 模式
+            兼容 API / 演示模式
           </div>
         </div>
       </div>
