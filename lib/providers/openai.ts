@@ -150,7 +150,8 @@ async function callOpenAIImageEdit(params: {
   try {
     const formData = new FormData();
 
-    for (const [index, imageSource] of params.images.entries()) {
+    for (let index = 0; index < params.images.length; index += 1) {
+      const imageSource = params.images[index];
       const imageFile = await normalizeImageSourceToFile(imageSource, `input-${index + 1}`);
       formData.append('image', imageFile);
     }
