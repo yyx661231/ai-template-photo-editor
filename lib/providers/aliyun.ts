@@ -7,21 +7,38 @@ import { ImageEditProvider } from './types';
 const DASHSCOPE_API_KEY = process.env.DASHSCOPE_API_KEY;
 const DASHSCOPE_BASE_URL =
   process.env.DASHSCOPE_BASE_URL ||
-  'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation';
+  'https://dashscope.aliyuncs.com/api/v1/services/aigc/image-generation/generation';
 const DASHSCOPE_MODEL = process.env.DASHSCOPE_MODEL || 'wan2.7-image-pro';
-const DASHSCOPE_SIZE = process.env.DASHSCOPE_IMAGE_SIZE || '2K';
-const REQUEST_TIMEOUT_MS = Number(process.env.DASHSCOPE_REQUEST_TIMEOUT_MS || 180000);
+const DASHSCOPE_SIZE = process.env.DASHSCOPE_IMAGE_SIZE || '1K';
+const REQUEST_TIMEOUT_MS = Number(process.env.DASHSCOPE_REQUEST_TIMEOUT_MS || 600000);
+const DASHSCOPE_POLL_INTERVAL_MS = Number(process.env.DASHSCOPE_POLL_INTERVAL_MS || 5000);
+const DASHSCOPE_POLL_MAX_ATTEMPTS = Number(process.env.DASHSCOPE_POLL_MAX_ATTEMPTS || 120);
 
-interface DashScopeImageResponse {
+interface DashScopeCreateTaskResponse {
   request_id?: string;
   code?: string;
   message?: string;
   output?: {
+    task_id?: string;
+    task_status?: string;
+  };
+}
+
+interface DashScopeTaskResultResponse {
+  request_id?: string;
+  code?: string;
+  message?: string;
+  output?: {
+    task_id?: string;
+    task_status?: string;
+    results?: Array<{
+      url?: string;
+    }>;
     choices?: Array<{
       message?: {
         content?: Array<{
-          image?: string;
           type?: string;
+          image?: string;
         }>;
       };
     }>;
@@ -85,7 +102,16 @@ function buildAliyunPrompt(prefix: string, prompt: string) {
   return `${prefix}\n\n${prompt}`;
 }
 
-async function callDashScopeImageEdit(params: {
+function sleep(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function getTaskQueryUrl(taskId: string): string {
+  const url = new URL(DASHSCOPE_BASE_URL);
+  return `${url.origin}/api/v1/tasks/${taskId}`;
+}
+
+async function createDashScopeTask(params: {
   images: string[];
   prompt: string;
 }): Promise<string> {
@@ -99,6 +125,7 @@ async function callDashScopeImageEdit(params: {
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
+        'X-DashScope-Async': 'enable',
       },
       body: JSON.stringify({
         model: DASHSCOPE_MODEL,
@@ -114,33 +141,33 @@ async function callDashScopeImageEdit(params: {
           size: DASHSCOPE_SIZE,
           n: 1,
           watermark: false,
+          enable_interleave: false,
         },
       }),
       signal: controller.signal,
     });
 
-    const payload = (await response.json().catch(() => null)) as DashScopeImageResponse | null;
+    const payload = (await response.json().catch(() => null)) as DashScopeCreateTaskResponse | null;
 
     if (!response.ok) {
-      throw new Error(payload?.message || '阿里云百炼图像接口调用失败。');
+      throw new Error(payload?.message || '阿里云百炼创建任务失败。');
     }
 
     if (payload?.code) {
       throw new Error(payload.message || payload.code);
     }
 
-    const contentList = payload?.output?.choices?.[0]?.message?.content || [];
-    const imageItem = contentList.find((item) => item.type === 'image' && item.image);
+    const taskId = payload?.output?.task_id;
 
-    if (!imageItem?.image) {
-      throw new Error('阿里云百炼未返回可用图片结果。');
+    if (!taskId) {
+      throw new Error('阿里云百炼未返回 task_id，无法继续轮询结果。');
     }
 
-    return imageItem.image;
+    return taskId;
   } catch (error) {
     if ((error as Error).name === 'AbortError') {
       throw new Error(
-        `阿里云百炼图像接口超时，已等待 ${REQUEST_TIMEOUT_MS}ms。建议提高 DASHSCOPE_REQUEST_TIMEOUT_MS。`
+        `阿里云百炼创建任务超时，已等待 ${REQUEST_TIMEOUT_MS}ms。建议检查网络或提高 DASHSCOPE_REQUEST_TIMEOUT_MS。`
       );
     }
 
@@ -148,6 +175,86 @@ async function callDashScopeImageEdit(params: {
   } finally {
     clearTimeout(timeout);
   }
+}
+
+function extractImageUrlFromTaskResult(payload: DashScopeTaskResultResponse): string | null {
+  const resultsUrl = payload.output?.results?.find((item) => item.url)?.url;
+  if (resultsUrl) {
+    return resultsUrl;
+  }
+
+  const contentList = payload.output?.choices?.[0]?.message?.content || [];
+  const imageItem = contentList.find((item) => item.type === 'image' && item.image);
+
+  return imageItem?.image || null;
+}
+
+async function pollDashScopeTaskResult(taskId: string): Promise<string> {
+  const apiKey = getDashScopeApiKey();
+  const taskUrl = getTaskQueryUrl(taskId);
+
+  for (let attempt = 0; attempt < DASHSCOPE_POLL_MAX_ATTEMPTS; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), Math.min(REQUEST_TIMEOUT_MS, 120000));
+
+    try {
+      const response = await fetch(taskUrl, {
+        method: 'GET',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+        },
+        signal: controller.signal,
+      });
+
+      const payload = (await response.json().catch(() => null)) as DashScopeTaskResultResponse | null;
+
+      if (!response.ok) {
+        throw new Error(payload?.message || '阿里云百炼查询任务结果失败。');
+      }
+
+      if (payload?.code) {
+        throw new Error(payload.message || payload.code);
+      }
+
+      const status = payload?.output?.task_status;
+
+      if (status === 'SUCCEEDED') {
+        const resultImageUrl = payload ? extractImageUrlFromTaskResult(payload) : null;
+
+        if (!resultImageUrl) {
+          throw new Error('阿里云百炼任务成功，但未返回图片 URL。');
+        }
+
+        return resultImageUrl;
+      }
+
+      if (status === 'FAILED' || status === 'CANCELED' || status === 'CANCELLED') {
+        throw new Error(`阿里云百炼任务失败，状态：${status}`);
+      }
+    } catch (error) {
+      if ((error as Error).name === 'AbortError') {
+        // 单次查询超时，继续下一轮轮询
+      } else {
+        throw error;
+      }
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    await sleep(DASHSCOPE_POLL_INTERVAL_MS);
+  }
+
+  throw new Error(
+    `阿里云百炼任务轮询超时：已轮询 ${DASHSCOPE_POLL_MAX_ATTEMPTS} 次，每次间隔 ${DASHSCOPE_POLL_INTERVAL_MS}ms。`
+  );
+}
+
+async function callDashScopeImageEditAsync(params: {
+  images: string[];
+  prompt: string;
+}): Promise<string> {
+  const taskId = await createDashScopeTask(params);
+  return pollDashScopeTaskResult(taskId);
 }
 
 export class AliyunImageProvider implements ImageEditProvider {
@@ -173,7 +280,7 @@ export class AliyunImageProvider implements ImageEditProvider {
       request.prompt || ''
     );
 
-    const resultImageUrl = await callDashScopeImageEdit({
+    const resultImageUrl = await callDashScopeImageEditAsync({
       images,
       prompt,
     });
@@ -191,7 +298,7 @@ export class AliyunImageProvider implements ImageEditProvider {
       request.currentPrompt
     );
 
-    const resultImageUrl = await callDashScopeImageEdit({
+    const resultImageUrl = await callDashScopeImageEditAsync({
       images: [await normalizeImageSource(request.imageUrl)],
       prompt,
     });
