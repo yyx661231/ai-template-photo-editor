@@ -333,7 +333,7 @@ export default function Home() {
           <p className="mt-1">
             {activeTaskId
               ? `当前任务 ID：${activeTaskId}`
-              : '后端支持两种模式：配置兼容图片接口的 OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_IMAGE_MODEL，或将 IMAGE_PROVIDER 设为 demo 进入演示模式'}
+              : '后端支持三种模式：阿里云百炼（IMAGE_PROVIDER=aliyun-bailian + DASHSCOPE_API_KEY）、兼容图片接口（OPENAI_API_KEY / OPENAI_BASE_URL / OPENAI_IMAGE_MODEL），或 demo 演示模式'}
           </p>
         </div>
       </main>
